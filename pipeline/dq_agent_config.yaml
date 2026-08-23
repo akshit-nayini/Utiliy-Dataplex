@@ -1,0 +1,39 @@
+dq_agent:
+  name: utility_bills_dq_agent
+  owner: data-eng-team
+  enforce_block_threshold: 0.01  # block if invalid ratio > 1%
+  enforce_block_count: 100       # or if > 100 invalid rows
+  knowledge_catalog:
+    use_ai_segmentation: true
+    ai_model: knowledge-catalog-default
+    entry_group: utility_bills_group
+    location: us-central1
+    tag_template: dq_metrics_template
+  dataplex_integration: true
+  staging_dataset: utility_bills
+  sources:
+    customer:
+      schema: schemas/customer_schema.yaml
+      staging_table: customer_staging
+      data_scan_id: customer-dq-scan
+      spec_file: dataplex/dq_scan_customer.yaml
+    utility_details:
+      schema: schemas/utility_details_schema.yaml
+      staging_table: utility_details_staging
+      data_scan_id: utility-details-dq-scan
+      spec_file: dataplex/dq_scan_utility_details.yaml
+    utility_bills:
+      schema: schemas/utility_bill_schema.yaml
+      staging_table: staging
+      data_scan_id: utility-bills-dq-scan
+      spec_file: dataplex/dq_scan_utility_bills.yaml
+      # this scan also carries the cross-table referential integrity and
+      # currency-consistency sqlAssertion rules against customer/utility_details
+  consolidated_output_table: utility_bills_consolidated
+  dataplex_scan:
+    location: us-central1
+    results_dataset: dq_admin
+    results_table: dataplex_dq_results
+  reporting:
+    bq_dataset: dq_admin
+    bq_table: dq_metrics

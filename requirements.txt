@@ -1,0 +1,27 @@
+# Python dependencies for the metrics runner (run_metrics.py).
+# Install into a venv:  python -m pip install -r requirements.txt
+#
+# NOT installable via pip (must already be on the host machine):
+#   * Java JDK 17        (set JAVA_HOME) — required by PySpark's JVM
+#   * MSSQL ODBC Driver  (18 / 17 / 13) — https://aka.ms/odbc
+# The JDBC jar (mssql-jdbc) and Windows auth DLL + Hadoop winutils are vendored
+# under master/drivers/ and master/hadoop/ — no install needed for those.
+
+# Pinned to the versions this engine was built and verified against
+# (Python 3.13, JDK 17).
+pyspark==4.1.2
+pyodbc==5.3.0
+
+# Test dependency (optional — only for `pytest tests/`):
+pytest>=8.0
+
+# GCP + Airflow additions for validation pipeline
+apache-airflow[gcp]==2.5.1
+google-cloud-storage==2.10.0
+google-cloud-bigquery==3.11.0
+google-cloud-datacatalog==3.15.0
+google-cloud-dataplex==1.9.0
+PyYAML==6.0
+
+# Dataflow pipeline
+apache-beam[gcp]==2.52.0

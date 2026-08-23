@@ -1,0 +1,20 @@
+columns:
+  customer_id:
+    type: string
+    required: true
+    regex: '^[A-Z0-9]{8}$'
+  name:
+    type: string
+    required: true
+  email:
+    type: string
+    required: true
+    regex: '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
+  region:
+    type: string
+    required: true
+    allowed_values: ['US', 'EU', 'UK']
+  registered_currency:
+    type: string
+    required: true
+    allowed_values: ['USD', 'EUR', 'GBP']

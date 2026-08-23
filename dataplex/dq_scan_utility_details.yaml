@@ -1,0 +1,45 @@
+# Dataplex Auto DQ scan for the utility_details staging table.
+# gcloud dataplex datascans create data-quality utility-details-dq-scan \
+#   --data-source-resource=//bigquery.googleapis.com/projects/<PROJECT_ID>/datasets/utility_bills/tables/utility_details_staging \
+#   --data-quality-spec-file=dataplex/dq_scan_utility_details.yaml
+
+rules:
+  - column: account_id
+    dimension: VALIDITY
+    nonNullExpectation: {}
+    threshold: 1.0
+  - column: account_id
+    dimension: UNIQUENESS
+    uniquenessExpectation: {}
+    threshold: 1.0
+  - column: customer_id
+    dimension: VALIDITY
+    nonNullExpectation: {}
+    threshold: 1.0
+  - column: utility_type
+    dimension: VALIDITY
+    setExpectation:
+      values: ['ELECTRICITY', 'GAS', 'WATER']
+    threshold: 1.0
+  - column: region
+    dimension: VALIDITY
+    setExpectation:
+      values: ['US', 'EU', 'UK']
+    threshold: 1.0
+
+  # Cross-table referential integrity: every utility_details.customer_id must
+  # exist in the customer table (config-only SQL rule, no custom code).
+  - dimension: INTEGRITY
+    name: customer_id_exists_in_customer
+    sqlAssertion:
+      sqlStatement: >
+        SELECT customer_id FROM `${PROJECT_ID}.utility_bills.utility_details_staging` ud
+        WHERE NOT EXISTS (
+          SELECT 1 FROM `${PROJECT_ID}.utility_bills.customer_staging` c
+          WHERE c.customer_id = ud.customer_id
+        )
+    threshold: 1.0
+
+postScanActions:
+  bigqueryExport:
+    resultsTable: projects/${PROJECT_ID}/datasets/dq_admin/tables/dataplex_dq_results

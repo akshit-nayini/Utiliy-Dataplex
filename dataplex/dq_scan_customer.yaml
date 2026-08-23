@@ -1,0 +1,38 @@
+# Dataplex Auto DQ scan for the customer staging table.
+# gcloud dataplex datascans create data-quality customer-dq-scan \
+#   --data-source-resource=//bigquery.googleapis.com/projects/<PROJECT_ID>/datasets/utility_bills/tables/customer_staging \
+#   --data-quality-spec-file=dataplex/dq_scan_customer.yaml
+
+rules:
+  - column: customer_id
+    dimension: VALIDITY
+    nonNullExpectation: {}
+    threshold: 1.0
+  - column: customer_id
+    dimension: VALIDITY
+    regexExpectation:
+      regex: '^[A-Z0-9]{8}$'
+    threshold: 1.0
+  - column: customer_id
+    dimension: UNIQUENESS
+    uniquenessExpectation: {}
+    threshold: 1.0
+  - column: email
+    dimension: VALIDITY
+    regexExpectation:
+      regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    threshold: 1.0
+  - column: region
+    dimension: VALIDITY
+    setExpectation:
+      values: ['US', 'EU', 'UK']
+    threshold: 1.0
+  - column: registered_currency
+    dimension: VALIDITY
+    setExpectation:
+      values: ['USD', 'EUR', 'GBP']
+    threshold: 1.0
+
+postScanActions:
+  bigqueryExport:
+    resultsTable: projects/${PROJECT_ID}/datasets/dq_admin/tables/dataplex_dq_results

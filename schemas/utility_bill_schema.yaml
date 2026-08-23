@@ -1,0 +1,20 @@
+columns:
+  account_id:
+    type: string
+    required: true
+    regex: '^[A-Z0-9]{8}$'
+  bill_date:
+    type: string
+    required: true
+    regex: '^\\d{4}-\\d{2}-\\d{2}$'
+  amount:
+    type: float
+    required: true
+    min: 0
+  currency:
+    type: string
+    required: true
+    allowed_values: ['USD', 'EUR', 'GBP']
+  meter_id:
+    type: string
+    required: false

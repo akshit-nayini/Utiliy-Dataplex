@@ -1,0 +1,20 @@
+columns:
+  account_id:
+    type: string
+    required: true
+    regex: '^[A-Z0-9]{8}$'
+  customer_id:
+    type: string
+    required: true
+    regex: '^[A-Z0-9]{8}$'
+  utility_type:
+    type: string
+    required: true
+    allowed_values: ['ELECTRICITY', 'GAS', 'WATER']
+  meter_id:
+    type: string
+    required: true
+  region:
+    type: string
+    required: true
+    allowed_values: ['US', 'EU', 'UK']

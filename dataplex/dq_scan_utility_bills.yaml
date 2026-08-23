@@ -1,0 +1,91 @@
+# Dataplex Auto Data Quality scan definition for the utility_bills dataset.
+# Deploy with:
+#   gcloud dataplex datascans create data-quality utility-bills-dq-scan \
+#     --project=<PROJECT_ID> --location=us-central1 \
+#     --data-source-resource=//bigquery.googleapis.com/projects/<PROJECT_ID>/datasets/utility_bills/tables/staging \
+#     --data-quality-spec-file=dataplex/dq_scan_utility_bills.yaml
+#
+# This is config-only: no custom scanning code. Dataplex executes these rules
+# against the staging table and writes one row per rule per column to the
+# results export table (see dq_agent_config.yaml: dataplex_results_table).
+# pipeline/dataplex_gate.py reads that export to decide pass/fail per file.
+
+rules:
+  - column: account_id
+    dimension: VALIDITY
+    nonNullExpectation: {}
+    threshold: 1.0
+
+  - column: account_id
+    dimension: VALIDITY
+    regexExpectation:
+      regex: '^[A-Z0-9]{8}$'
+    threshold: 1.0
+
+  - column: bill_date
+    dimension: VALIDITY
+    nonNullExpectation: {}
+    threshold: 1.0
+
+  - column: bill_date
+    dimension: VALIDITY
+    regexExpectation:
+      regex: '^\d{4}-\d{2}-\d{2}$'
+    threshold: 1.0
+
+  - column: amount
+    dimension: VALIDITY
+    nonNullExpectation: {}
+    threshold: 1.0
+
+  - column: amount
+    dimension: VALIDITY
+    rangeExpectation:
+      minValue: '0'
+      strictMinEnabled: false
+    threshold: 1.0
+
+  - column: currency
+    dimension: VALIDITY
+    setExpectation:
+      values: ['USD', 'EUR', 'GBP']
+    threshold: 1.0
+
+# Row-level uniqueness / completeness rule surfaced as its own dimension so the
+# DQ agent can report it separately from column-level validity failures.
+  - column: account_id
+    dimension: UNIQUENESS
+    uniquenessExpectation: {}
+    threshold: 1.0
+
+  # Cross-table referential integrity: every bill must reference a known
+  # account in utility_details.
+  - dimension: INTEGRITY
+    name: account_id_exists_in_utility_details
+    sqlAssertion:
+      sqlStatement: >
+        SELECT account_id FROM `${PROJECT_ID}.utility_bills.staging` b
+        WHERE NOT EXISTS (
+          SELECT 1 FROM `${PROJECT_ID}.utility_bills.utility_details_staging` ud
+          WHERE ud.account_id = b.account_id
+        )
+    threshold: 1.0
+
+  # Cross-table attribute consistency: the bill's currency must match the
+  # registered currency of the customer that owns the account (join through
+  # utility_details -> customer).
+  - dimension: CONSISTENCY
+    name: bill_currency_matches_customer_registered_currency
+    sqlAssertion:
+      sqlStatement: >
+        SELECT b.account_id FROM `${PROJECT_ID}.utility_bills.staging` b
+        JOIN `${PROJECT_ID}.utility_bills.utility_details_staging` ud
+          ON ud.account_id = b.account_id
+        JOIN `${PROJECT_ID}.utility_bills.customer_staging` c
+          ON c.customer_id = ud.customer_id
+        WHERE b.currency != c.registered_currency
+    threshold: 1.0
+
+postScanActions:
+  bigqueryExport:
+    resultsTable: projects/${PROJECT_ID}/datasets/dq_admin/tables/dataplex_dq_results
