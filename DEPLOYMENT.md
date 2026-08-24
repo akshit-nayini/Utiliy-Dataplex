@@ -32,7 +32,10 @@ gcloud services enable \
 IAM: the service account running the DAG/Dataflow jobs needs
 `roles/bigquery.dataEditor`, `roles/bigquery.jobUser`,
 `roles/storage.objectAdmin` (on the raw and quarantine buckets),
-`roles/dataplex.dataScanEditor`, and `roles/datacatalog.entryGroupOwner`.
+`roles/dataplex.dataScanEditor`, and `roles/dataplex.catalogEditor` (create/
+update entry groups and entries in Dataplex Universal Catalog / Knowledge
+Catalog - the older `roles/datacatalog.entryGroupOwner` is for the
+deprecated Data Catalog write API and is blocked on newer projects).
 
 ## 1. GCS buckets
 
@@ -77,8 +80,9 @@ cross_table_invalid_ratio:FLOAT,failing_rows:INTEGER
 # dq_admin.dataplex_dq_results is created automatically by Dataplex the
 # first time a scan with a bigqueryExport postScanAction runs - no need to
 # pre-create it, just make sure the dq_admin dataset (above) already exists.
-# pipeline/dataplex_export.py also creates and drops its own temp tables
-# (dq_admin.quarantine_export_<source>_<job_id>) per run - no setup needed.
+# pipeline/dataplex_export.py also creates dq_admin.quarantine_<source> per
+# source - kept (not dropped) so it's auto-cataloged by Dataplex Universal
+# Catalog with a Preview tab of the actual bad rows - no setup needed.
 ```
 
 ## 3. Dataplex Auto DQ scans
@@ -115,25 +119,31 @@ out of the box. Each scan job's ID (`gcloud dataplex datascan-jobs list ...`
 or the `job_id` an Airflow XCom/Dataflow trigger passes along) is what
 `pipeline/dataplex_export.py` needs to pull that run's bad records.
 
-## 4. Data Catalog (Knowledge Catalog)
+## 4. Dataplex Universal Catalog (Knowledge Catalog)
+
+`gcloud data-catalog entry-groups create` is the deprecated Data Catalog
+API and is blocked for write operations on newer projects. Use the
+current Dataplex Universal Catalog equivalent instead - same underlying
+service:
 
 ```bash
-gcloud data-catalog entry-groups create utility_bills_group \
+gcloud dataplex entry-groups create utility-bills-group \
   --project=${PROJECT_ID} --location=${REGION}
-
-gcloud data-catalog tag-templates create dq_metrics_template \
-  --project=${PROJECT_ID} --location=${REGION} \
-  --field=id=invalid_ratio,type=double \
-  --field=id=row_count,type=double
 ```
+
+This step is optional - `pipeline/catalog.py` creates the entry group
+itself on first use if it doesn't already exist. Running it here just
+confirms the command/permissions work first. (No tag template is needed:
+`pipeline/dq_reporting.py` and `pipeline/dataplex_export.py` use the
+system-provided "generic" entry type and aspect type via
+`dataplex_v1.CatalogServiceClient`, not a custom Data Catalog tag
+template.)
 
 Enable Knowledge Catalog's AI-based metadata segregation on this entry
 group from the console (Dataplex Universal Catalog → Governance →
 Metadata enrichment → AI-generated metadata) — this is config only, no
-code change needed on our side. Dataplex Catalog and Data Catalog /
-Knowledge Catalog are the same underlying service (Dataplex Universal
-Catalog), so `customer_staging`, `utility_bills_consolidated`, and each
-source's `<source>_quarantine` Fileset entry all show up in the same
+code change needed on our side. `customer_staging`, `utility_bills_consolidated`,
+and each source's `<source>-quarantine` entry all show up in the same
 dashboard once registered.
 
 ## 5a. Cloud Composer (Airflow) path
@@ -200,20 +210,26 @@ bq query --use_legacy_sql=false \
 bq query --use_legacy_sql=false \
   "SELECT * FROM \`${PROJECT_ID}.dq_admin.dq_metrics\` ORDER BY 1 DESC LIMIT 10"
 
+# the actual bad rows per source, browsable directly - also what the
+# catalog's Preview tab shows for each <source>-quarantine entry:
+bq query --use_legacy_sql=false \
+  "SELECT failed_rule, dimension, * FROM \`${PROJECT_ID}.dq_admin.quarantine_utility_bills\` LIMIT 20"
+
 gsutil ls -r gs://${QUARANTINE_BUCKET}/quarantine/
 
-gcloud data-catalog entries lookup \
-  "//bigquery.googleapis.com/projects/${PROJECT_ID}/datasets/utility_bills/tables/utility_bills_consolidated"
-
-gcloud data-catalog entries lookup \
-  "//bigquery.googleapis.com/projects/${PROJECT_ID}/datasets/utility_bills/utility_bills_group/entries/utility_bills_quarantine"
+# browse the catalog directly (gcloud dataplex has no "entries describe"
+# lookup-by-resource equivalent yet - use the console):
+echo "Console: https://console.cloud.google.com/dataplex/catalog?project=${PROJECT_ID}"
 ```
 
-The catalog lookups (or the Dataplex Universal Catalog console) should
-show a `<source>_quarantine` Fileset entry per source, pointing at its
-Parquet file(s) in GCS, with a description containing the DQ breakdown by
-rule and dimension — that's the bad-record visibility on the catalog
-dashboard, refreshed on every scan run that finds something.
+The catalog console should show a `<source>-quarantine` entry per source,
+pointing at its Parquet file(s) in GCS as the linked resource, with a
+description containing the DQ breakdown by rule and dimension. For an
+actual row-level grid rather than a text summary, open
+`dq_admin.quarantine_<source>` directly in BigQuery (or find it in the
+catalog search - it's a real table, so it's auto-cataloged with its own
+schema and a data **Preview** tab) — that's the bad-record visibility on
+the dashboard, refreshed on every scan run that finds something.
 
 ## Operational note: load order matters for consolidation
 

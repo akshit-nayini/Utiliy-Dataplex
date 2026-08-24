@@ -16,11 +16,18 @@ pyodbc==5.3.0
 pytest>=8.0
 
 # GCP + Airflow additions for validation pipeline
+# (no google-cloud-datacatalog: catalog registration uses
+# dataplex_v1.CatalogServiceClient - see pipeline/catalog.py - since Data
+# Catalog's write API is deprecated and blocked on newer projects)
 apache-airflow[gcp]==2.5.1
 google-cloud-storage==2.10.0
 google-cloud-bigquery==3.11.0
-google-cloud-datacatalog==3.15.0
-google-cloud-dataplex==1.9.0
+# 1.9.0 predates the Catalog API (CatalogServiceClient/EntryGroup/EntryType/
+# AspectType) - that landed in the 2.x line, so this must be >= 2.x. Note:
+# apache-airflow[gcp]==2.5.1's provider packages may cap this lower for a
+# Composer install - if so, upgrade the Composer environment's Airflow
+# version or install this package outside the constraints file.
+google-cloud-dataplex>=2.20.0
 PyYAML==6.0
 
 # Dataflow pipeline

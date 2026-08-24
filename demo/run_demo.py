@@ -8,8 +8,8 @@ following a Bronze -> Silver -> Gold layout:
      Bronze and wait for it.
   3. Quarantine - pull the scan's failed rules' actual bad records via
      their failing_rows_query, export them to a Parquet file in GCS, and
-     register that file as a Fileset entry in Data Catalog / Dataplex
-     Catalog.
+     register that file as an entry in Dataplex Universal Catalog /
+     Knowledge Catalog.
   4. Silver - build orders_silver: the same Bronze rows, minus anything
      that appeared in a failing_rows_query, with proper types instead of
      all-STRING.
@@ -17,8 +17,8 @@ following a Bronze -> Silver -> Gold layout:
      over Silver (the business-consumable layer; this is also where a
      multi-source consolidation join would live if there were more than
      one Silver table - see the main framework's pipeline/consolidate.py).
-  6. Catalog - register Bronze and Gold in Data Catalog too, alongside the
-     quarantine Fileset entry from step 3.
+  6. Catalog - register Bronze and Gold in the catalog too, alongside the
+     quarantine entry from step 3.
 
 This exercises GCS, BigQuery, Dataplex Data Quality, and Data Catalog /
 Knowledge Catalog in one pass, against one table - see DEPLOYMENT.md for
@@ -56,7 +56,7 @@ SILVER_TABLE = "orders_silver"
 GOLD_TABLE = "orders_gold"
 DATA_SCAN_ID = "orders-dq-scan"
 LOCATION = "us-central1"
-ENTRY_GROUP = "dq_demo_group"
+ENTRY_GROUP = "dq-demo-group"  # entry group / entry IDs allow only letters, numbers, hyphens
 
 
 def main():
@@ -106,7 +106,7 @@ def main():
         },
     )
     register_table_in_catalog(
-        args.project, args.location, ENTRY_GROUP, "orders_bronze",
+        args.project, args.location, ENTRY_GROUP, "orders-bronze",
         {
             "display_name": "Demo Orders - Bronze (raw, ingested as-is)",
             "linked_resource": f"//bigquery.googleapis.com/projects/{args.project}/datasets/{DATASET}/tables/{BRONZE_TABLE}",
@@ -115,7 +115,7 @@ def main():
         },
     )
     register_table_in_catalog(
-        args.project, args.location, ENTRY_GROUP, "orders_gold",
+        args.project, args.location, ENTRY_GROUP, "orders-gold",
         {
             "display_name": "Demo Orders - Gold (order count / revenue by status)",
             "linked_resource": f"//bigquery.googleapis.com/projects/{args.project}/datasets/{DATASET}/tables/{GOLD_TABLE}",
@@ -129,8 +129,11 @@ def main():
     print(f"Silver rows (clean): {silver_result['row_count']}")
     print(f"Gold rows (by status): {gold_result['row_count']}")
     if export_result["gcs_uri"]:
-        print(f"Bad records Parquet: {export_result['gcs_uri']}")
+        print(f"Bad records Parquet (archival): {export_result['gcs_uri']}")
+        print(f"Bad records BigQuery table (browse rows here): {export_result['bigquery_table']}")
     print(f"Check the Dataplex Universal Catalog console for entry group '{ENTRY_GROUP}' to see all entries.")
+    print("Tip: the quarantine_orders table is auto-cataloged by BigQuery/Dataplex - open it in the")
+    print("console's Preview tab to see the actual failed rows, not just the summary description.")
 
 
 if __name__ == "__main__":

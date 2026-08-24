@@ -23,7 +23,10 @@ gcloud services enable \
 
 IAM: your user or service account needs `roles/bigquery.dataEditor`,
 `roles/bigquery.jobUser`, `roles/storage.objectAdmin` (on both buckets),
-`roles/dataplex.dataScanEditor`, and `roles/datacatalog.entryGroupOwner`.
+`roles/dataplex.dataScanEditor`, and `roles/dataplex.catalogEditor` (create/
+update entry groups and entries in Dataplex Universal Catalog / Knowledge
+Catalog - the old `roles/datacatalog.entryGroupOwner` is for the deprecated
+Data Catalog write API and won't work on projects where it's blocked).
 
 Authenticate for local Python calls (if running `run_demo.py` from a
 workstation rather than Cloud Shell):
@@ -68,8 +71,10 @@ bq mk --table ${PROJECT_ID}:dq_demo.orders_bronze \
 bq mk --table ${PROJECT_ID}:dq_demo.dq_metrics \
   dataset:STRING,rows_loaded:INTEGER,rows_quarantined:INTEGER
 
-# dq_demo.dataplex_dq_results and the run's quarantine_export_orders_<job_id>
-# temp table are both created automatically - no need to pre-create them.
+# dq_demo.dataplex_dq_results (Dataplex's own results export) and
+# dq_demo.quarantine_orders (the bad-records table run_demo.py builds and
+# keeps every run - browsable directly, and auto-cataloged by Dataplex
+# Universal Catalog with a Preview tab) are both created automatically.
 ```
 
 ## 4. Deploy the Dataplex scan
@@ -86,12 +91,24 @@ gcloud dataplex datascans create data-quality orders-dq-scan \
   --data-quality-spec-file=/tmp/dq_scan_orders.yaml
 ```
 
-## 5. Create the Data Catalog entry group
+## 5. Create the catalog entry group
+
+`gcloud data-catalog entry-groups create` is the deprecated Data Catalog
+API and is blocked for write operations on newer projects
+("INVALID_ARGUMENT: ... not allowed to perform write operations due to
+Data Catalog deprecation"). Use the Dataplex Universal Catalog (now also
+called Knowledge Catalog) equivalent instead - same underlying service,
+current API:
 
 ```bash
-gcloud data-catalog entry-groups create dq_demo_group \
+gcloud dataplex entry-groups create dq-demo-group \
   --project=${PROJECT_ID} --location=${REGION}
 ```
+
+This step is actually optional - `run_demo.py` creates the entry group
+itself on first use if it doesn't already exist (`pipeline/catalog.py`).
+Running it here just lets you confirm the command/permissions work before
+the full script runs.
 
 (Optional) enable Knowledge Catalog's AI-based metadata segregation on this
 entry group from the console (Dataplex Universal Catalog → Governance →
@@ -138,21 +155,32 @@ bq query --use_legacy_sql=false \
 bq query --use_legacy_sql=false \
   "SELECT * FROM \`${PROJECT_ID}.dq_demo.dq_metrics\` ORDER BY 1 DESC LIMIT 5"
 
+# the actual bad rows, browsable directly - this is what shows up in the
+# catalog's Preview tab too:
+bq query --use_legacy_sql=false \
+  "SELECT failed_rule, dimension, * FROM \`${PROJECT_ID}.dq_demo.quarantine_orders\` LIMIT 20"
+
 gsutil ls -r gs://${QUARANTINE_BUCKET}/quarantine/
 
 # browse the catalog directly:
 echo "Console: https://console.cloud.google.com/dataplex/governance/quality?project=${PROJECT_ID}"
 echo "Console: https://console.cloud.google.com/dataplex/catalog?project=${PROJECT_ID}"
+echo "Console: https://console.cloud.google.com/bigquery?project=${PROJECT_ID}&ws=!1m5!1m4!4m3!1s${PROJECT_ID}!2sdq_demo!3squarantine_orders"
 ```
 
-You should see three entries under the `dq_demo_group` entry group:
-`orders_bronze` (with rows-loaded/rows-quarantined in its description),
-`orders_gold` (with its row count built from Silver), and
-`orders_quarantine` (a Fileset entry pointing at the Parquet file, with the
-rule/dimension breakdown in its description). Silver isn't separately
-registered in this demo - it's an intermediate, always-rebuildable layer;
-add a `register_table_in_catalog` call for it too if you want it visible
-as well.
+You should see three entries under the `dq-demo-group` entry group:
+`orders-bronze` (with rows-loaded/rows-quarantined in its description),
+`orders-gold` (with its row count built from Silver), and
+`orders-quarantine` (pointing at the Parquet file as its linked resource,
+with the rule/dimension breakdown in its description). The
+`dq_demo.quarantine_orders` **table** is separate from that entry and is
+where the actual failed rows live - since it's a real BigQuery table (not
+just a GCS file), it's auto-cataloged by Dataplex Universal Catalog with
+its own schema and a data **Preview** tab, so you can browse the rows
+themselves there, not just the summary description. Silver isn't
+separately registered in this demo - it's an intermediate,
+always-rebuildable layer; add a `register_table_in_catalog` call for it
+too if you want it visible as well.
 
 ## 8. Re-running
 
@@ -170,5 +198,5 @@ gsutil -m rm -r gs://${RAW_BUCKET}
 gsutil -m rm -r gs://${QUARANTINE_BUCKET}
 bq rm -r -f -d ${PROJECT_ID}:dq_demo
 gcloud dataplex datascans delete orders-dq-scan --project=${PROJECT_ID} --location=${REGION} --quiet
-gcloud data-catalog entry-groups delete dq_demo_group --project=${PROJECT_ID} --location=${REGION} --quiet
+gcloud dataplex entry-groups delete dq-demo-group --project=${PROJECT_ID} --location=${REGION} --quiet
 ```

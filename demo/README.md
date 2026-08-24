@@ -4,8 +4,13 @@ A minimal, self-contained pipeline built to let you **test every service in
 the main framework in isolation, in under 15 minutes**, without standing up
 Composer or Dataflow. One table lineage (`orders`: Bronze → Silver → Gold),
 one GCS bucket for input, one GCS bucket for bad-record output, one
-Dataplex scan, one Data Catalog entry group. Everything runs from a single
-Python script, [run_demo.py](run_demo.py).
+Dataplex scan, one Dataplex Universal Catalog (Knowledge Catalog) entry
+group. Everything runs from a single Python script, [run_demo.py](run_demo.py).
+
+Catalog registration uses `dataplex_v1.CatalogServiceClient`
+([pipeline/catalog.py](pipeline/catalog.py)), not the older
+`datacatalog_v1` API - Data Catalog's write API is being deprecated and is
+already blocked on newer projects.
 
 This folder is fully independent of the rest of the repository - it has
 its own `requirements.txt`, its own copies of the loader/export/reporting
@@ -21,14 +26,14 @@ framework at all.
 | **Bronze** | `orders_bronze` | Every row of the raw Parquet file, ingested as-is, all-`STRING` columns. Nothing is ever filtered out of Bronze - it's the permanent, unmodified record of what was received. |
 | **Silver** | `orders_silver` | Bronze rows that passed *every* Dataplex rule, with proper types (`amount` as `FLOAT64`, `order_date` as `DATE`). Built by excluding, via `NOT IN`, every key Dataplex's own `failing_rows_query` returned for any failed rule - so Silver and the quarantine Parquet file are two views of the exact same Dataplex verdict, never independently maintained logic. |
 | **Gold** | `orders_gold` | A business-consumable rollup over Silver: order count, total revenue, and average order value per `status`. This is also where a **multi-source consolidation join belongs**, once there's more than one Silver table to bring together - see the main framework's `pipeline/consolidate.py`, which is exactly that pattern applied to three sources instead of one. This one-table demo has nothing to consolidate, so Gold here is a straight aggregate. |
-| *(quarantine)* | GCS Parquet + Fileset catalog entry | Not a BigQuery table - Dataplex's bad-record findings, exported once per scan run. Sits alongside the three layers as the DQ agent's audit trail. |
+| *(quarantine)* | GCS Parquet + catalog entry | Not a BigQuery table - Dataplex's bad-record findings, exported once per scan run. Sits alongside the three layers as the DQ agent's audit trail. |
 
 ```mermaid
 flowchart LR
     PARQ[sample_orders.parquet\n~1000 rows, in GCS] -->|loader.py: load everything| BRZ[(orders_bronze\nall rows, all-STRING)]
     BRZ -->|Dataplex Auto DQ scan| RESULT[Scan job result:\n8 rule pass/fail counts]
     RESULT -->|dataplex_export.py:\nfailing_rows_query per failed rule| PARQUET[(GCS Parquet:\nbad records + which rule failed)]
-    PARQUET -->|register as Fileset entry| CATALOG[Data Catalog /\nDataplex Catalog]
+    PARQUET -->|catalog.py: upsert_entry| CATALOG[Dataplex Universal Catalog\n/ Knowledge Catalog]
     RESULT -->|silver.py: NOT IN bad keys,\nproper types| SLV[(orders_silver\nclean rows only)]
     SLV -->|gold.py: GROUP BY status| GLD[(orders_gold\ncount / revenue / avg by status)]
     BRZ -->|dq_reporting.py| CATALOG
@@ -40,9 +45,9 @@ flowchart LR
 | Service | What you'll see |
 |---|---|
 | **Cloud Storage** | The raw Parquet file lands in a GCS bucket; the bad records Dataplex finds are exported back to GCS as a (separate) Parquet file |
-| **BigQuery** | Bronze is bulk-loaded unfiltered; Silver and Gold are derived tables rebuilt (`CREATE OR REPLACE`) on every run |
+| **BigQuery** | Bronze is bulk-loaded unfiltered; Silver, Gold, and `quarantine_orders` (the actual bad rows, kept and overwritten each run) are derived tables rebuilt (`CREATE OR REPLACE`) on every run |
 | **Dataplex (Data Quality)** | A Dataplex Auto DQ scan validates Bronze against 8 rules (not-null, regex format, allowed values, numeric range, uniqueness) - this is the actual validation engine, not custom Python code, and it's also what decides which rows make it into Silver |
-| **Data Catalog / Dataplex Catalog / Knowledge Catalog** | Three entries appear in the catalog: `orders_bronze` and `orders_gold` (each with a DQ/row-count summary) and an `orders_quarantine` Fileset entry pointing at the bad-records Parquet file, with a breakdown of which rule each row failed |
+| **Dataplex Universal Catalog / Knowledge Catalog** | Three entries appear in the catalog (`dataplex_v1.CatalogServiceClient`, the generic system entry type - no custom EntryType/AspectType setup needed): `orders-bronze` and `orders-gold` (each with a DQ/row-count summary in their description) and `orders-quarantine`, whose linked resource is the bad-records Parquet file and whose description points to the `quarantine_orders` BigQuery table. That table is a *fourth*, unregistered piece of catalog visibility: because it's a real BigQuery table, Dataplex auto-catalogs it with its own schema and a data **Preview** tab, showing the actual failed rows - no registration code needed for that part |
 
 ## The data
 
@@ -112,7 +117,7 @@ convention as the main framework. The eight rules:
    `dataplex_export.export_bad_records_to_parquet()` runs each of those,
    unions the results (tagged with which rule/dimension failed), extracts
    them to a Parquet file in your quarantine bucket, and registers that
-   file as an `orders_quarantine` Fileset entry in the catalog.
+   file as the `orders-quarantine` catalog entry (`pipeline/catalog.py`).
 5. **Silver** - `pipeline/silver.py` rebuilds `orders_silver` from Bronze,
    excluding any row whose key showed up in a `failing_rows_query`, and
    casting `amount`/`order_date` to real types.
@@ -143,7 +148,7 @@ python demo/run_demo.py --project=$PROJECT_ID --raw_bucket=$RAW_BUCKET --quarant
 
 The script prints a PASS/FAIL line per rule, Bronze/Silver/Gold row
 counts, the GCS path of the exported Parquet file, and a reminder of which
-Data Catalog entry group to check. From there, open
+catalog entry group to check. From there, open
 **Dataplex → Governance → Data Quality** to see the scan history/score,
 and **Dataplex Universal Catalog → Search** (or the entry group directly)
 to see the entries this run created or refreshed.
@@ -152,6 +157,6 @@ to see the entries this run created or refreshed.
 
 Delete the two GCS buckets, the `dq_demo` BigQuery dataset (this drops
 Bronze, Silver, and Gold together), the `orders-dq-scan` Dataplex scan, and
-the `dq_demo_group` Data Catalog entry group. None of this touches the
-main framework's resources - they're named/scoped independently (`dq_demo`
-vs. `utility_bills`/`dq_admin`).
+the `dq-demo-group` entry group (`gcloud dataplex entry-groups delete`).
+None of this touches the main framework's resources - they're
+named/scoped independently (`dq_demo` vs. `utility_bills`/`dq_admin`).

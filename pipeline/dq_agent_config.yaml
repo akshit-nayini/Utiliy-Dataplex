@@ -11,9 +11,9 @@ dq_agent:
   knowledge_catalog:
     use_ai_segmentation: true
     ai_model: knowledge-catalog-default
-    entry_group: utility_bills_group
+    # entry group / entry IDs allow only letters, numbers, hyphens (no underscores)
+    entry_group: utility-bills-group
     location: us-central1
-    tag_template: dq_metrics_template
   dataplex_integration: true
   staging_dataset: utility_bills
   sources:

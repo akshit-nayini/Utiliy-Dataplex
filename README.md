@@ -41,16 +41,25 @@ larger framework; it's fully independent of everything below.
    Every Dataplex rule that fails carries an auto-generated
    `failing_rows_query` — a SQL query that returns the actual
    non-conforming rows. [pipeline/dataplex_export.py](pipeline/dataplex_export.py)
-   runs every failed rule's query for a scan job, unions the results
-   (tagged with which rule/dimension each row failed), and extracts that
-   to a **Parquet file in GCS**: `gs://<quarantine_bucket>/quarantine/<source>/<job_id>/`.
-4. **The Parquet file is registered in the catalog.**
-   `register_parquet_quarantine_in_catalog()` creates/updates a **Fileset**
-   entry in Data Catalog (Dataplex Catalog / Knowledge Catalog — same
-   service) pointing at that Parquet file, with a live breakdown of bad
-   records by rule/dimension in its description. It shows up next to the
-   `customer_staging`, `utility_bills_consolidated`, etc. entries on the
-   same dashboard.
+   runs every failed rule's query for a scan job and unions the results
+   (tagged with which rule/dimension each row failed) into
+   **`dq_admin.quarantine_<source>`** — a real, kept BigQuery table, not a
+   temp table. Because it's a genuine BigQuery table, it's **auto-cataloged
+   by Dataplex Universal Catalog with a full schema and a data Preview
+   tab** — no registration code needed to make the actual bad rows
+   browsable in the dashboard. The same table is also extracted to a
+   **Parquet file in GCS** (`gs://<quarantine_bucket>/quarantine/<source>/<job_id>/`)
+   as a portable archival copy.
+4. **The Parquet file gets its own catalog entry too.**
+   `register_parquet_quarantine_in_catalog()` creates/updates an entry in
+   Dataplex Universal Catalog (Knowledge Catalog) — via
+   `dataplex_v1.CatalogServiceClient`, not the deprecated `datacatalog_v1`
+   write API — pointing at that Parquet file, with a live breakdown of bad
+   records by rule/dimension and a pointer to the `quarantine_<source>`
+   table in its description. It shows up next to the `customer_staging`,
+   `utility_bills_consolidated`, etc. entries on the same dashboard, but
+   for browsing individual rows the BigQuery table (auto-cataloged) is the
+   one with an actual data grid.
 5. **Consolidation is a separate, always-on join.**
    [pipeline/consolidate.py](pipeline/consolidate.py) builds
    `utility_bills_consolidated` with an `INNER JOIN` across the three
@@ -69,8 +78,9 @@ for the DQ agent owner.
 |---|---|
 | `customer_staging`, `utility_details_staging`, `staging` (bills) | Every row of every file, ingested as-is, all-`STRING` columns |
 | `utility_bills_consolidated` | Denormalized join of all three, cross-table-clean rows only |
-| `gs://<quarantine_bucket>/quarantine/<source>/<job_id>/*.parquet` | Bad records per source per scan run, as found by Dataplex, tagged by rule |
-| Data Catalog Fileset entry `<source>_quarantine` | Points at the Parquet above, with a DQ breakdown — visible on the catalog dashboard |
+| `dq_admin.quarantine_<source>` | Bad records per source, as found by Dataplex, tagged by rule — a real BigQuery table (overwritten each scan run), auto-cataloged with a data Preview tab |
+| `gs://<quarantine_bucket>/quarantine/<source>/<job_id>/*.parquet` | Portable archival copy of the same bad records, one snapshot per scan job |
+| Catalog entry `<source>-quarantine` | Points at the Parquet above, with a DQ breakdown and a pointer to the BigQuery table — visible on the catalog dashboard |
 
 ## Architecture A: Cloud Composer (Airflow)
 
@@ -97,7 +107,7 @@ flowchart LR
     E2 -.-> Q2[(GCS Parquet:\nutility_details bad records)]
     E3 -.-> Q3[(GCS Parquet:\nutility_bills bad records)]
 
-    Q1 & Q2 & Q3 --> CATALOG[Dataplex / Knowledge Catalog\nFileset entries + DQ breakdown]
+    Q1 & Q2 & Q3 --> CATALOG[Dataplex / Knowledge Catalog\ncatalog entries + DQ breakdown]
 
     E1 & E2 & E3 -->|always| JOIN[consolidate.py\nINNER JOIN x3 + currency filter]
     JOIN --> CONS[(utility_bills_consolidated)]
@@ -134,7 +144,7 @@ flowchart LR
 
     SC1 & SC2 & SC3 -->|job-completion Pub/Sub| POST[post_scan_gate.py\nCloud Function / Composer task]
     POST -.-> Q[(GCS Parquet:\nbad records per source)]
-    Q --> CATALOG[Dataplex / Knowledge Catalog\nFileset entries + DQ breakdown]
+    Q --> CATALOG[Dataplex / Knowledge Catalog\ncatalog entries + DQ breakdown]
     POST -->|always| JOIN[consolidate.py]
     JOIN --> CONS[(utility_bills_consolidated)]
     JOIN --> REPORT[dq_reporting.py]
@@ -162,7 +172,7 @@ on a schedule.
 | [dataflow/beam_dq_pipeline.py](dataflow/beam_dq_pipeline.py) | Same bulk ingestion, expressed as a Beam pipeline (Dataflow path) |
 | `dataplex/dq_scan_customer.yaml`, `dq_scan_utility_details.yaml`, `dq_scan_utility_bills.yaml` | Dataplex Auto DQ rule specs — column rules plus the cross-table `sqlAssertion` referential/consistency rules — this is where validation actually happens |
 | [pipeline/dataplex_gate.py](pipeline/dataplex_gate.py) | Reads a scan's results for reporting, computes an informational `alert` flag — never blocks anything |
-| [pipeline/dataplex_export.py](pipeline/dataplex_export.py) | Pulls every failed rule's `failing_rows_query`, exports the actual bad records to Parquet in GCS, and registers that file as a Fileset entry in the catalog |
+| [pipeline/dataplex_export.py](pipeline/dataplex_export.py) | Pulls every failed rule's `failing_rows_query`, exports the actual bad records to Parquet in GCS, and registers that file as a catalog entry (Dataplex Universal Catalog) |
 | [pipeline/consolidate.py](pipeline/consolidate.py) | Joins the three staging tables into `utility_bills_consolidated` |
 | [pipeline/dq_reporting.py](pipeline/dq_reporting.py) | Writes DQ metrics to BigQuery, registers dataset metadata/lineage in Data Catalog |
 | [pipeline/dq_agent_config.yaml](pipeline/dq_agent_config.yaml) | DQ Agent scope: per-source alert thresholds/scan refs, quarantine GCS bucket, consolidated output table name, Knowledge Catalog settings (AI segregation is config-only) |

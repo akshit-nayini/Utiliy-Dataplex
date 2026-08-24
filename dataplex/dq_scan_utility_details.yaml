@@ -30,7 +30,7 @@ rules:
   # Cross-table referential integrity: every utility_details.customer_id must
   # exist in the customer table (config-only SQL rule, no custom code).
   - dimension: INTEGRITY
-    name: customer_id_exists_in_customer
+    name: customer-id-exists-in-customer
     sqlAssertion:
       sqlStatement: >
         SELECT customer_id FROM `${PROJECT_ID}.utility_bills.utility_details_staging` ud
@@ -38,7 +38,6 @@ rules:
           SELECT 1 FROM `${PROJECT_ID}.utility_bills.customer_staging` c
           WHERE c.customer_id = ud.customer_id
         )
-    threshold: 1.0
 
 postScanActions:
   bigqueryExport:

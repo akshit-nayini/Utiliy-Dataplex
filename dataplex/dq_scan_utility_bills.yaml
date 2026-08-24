@@ -43,14 +43,15 @@ rules:
 
   # amount is ingested as STRING (pipeline/loader.py loads every column as
   # STRING so no row is ever rejected at load time) - so both "is it a
-  # number" and "is it >= 0" are expressed as one sqlAssertion.
+  # number" and "is it >= 0" are expressed as one sqlAssertion. Rule names
+  # may only contain letters, numbers, and hyphens; sqlAssertion rules
+  # don't accept a threshold field at all.
   - dimension: VALIDITY
-    name: amount_is_non_negative_number
+    name: amount-is-non-negative-number
     sqlAssertion:
       sqlStatement: >
         SELECT account_id FROM `${PROJECT_ID}.utility_bills.staging`
         WHERE SAFE_CAST(amount AS FLOAT64) IS NULL OR SAFE_CAST(amount AS FLOAT64) < 0
-    threshold: 1.0
 
   - column: currency
     dimension: VALIDITY
@@ -68,7 +69,7 @@ rules:
   # Cross-table referential integrity: every bill must reference a known
   # account in utility_details.
   - dimension: INTEGRITY
-    name: account_id_exists_in_utility_details
+    name: account-id-exists-in-utility-details
     sqlAssertion:
       sqlStatement: >
         SELECT account_id FROM `${PROJECT_ID}.utility_bills.staging` b
@@ -76,13 +77,12 @@ rules:
           SELECT 1 FROM `${PROJECT_ID}.utility_bills.utility_details_staging` ud
           WHERE ud.account_id = b.account_id
         )
-    threshold: 1.0
 
   # Cross-table attribute consistency: the bill's currency must match the
   # registered currency of the customer that owns the account (join through
   # utility_details -> customer).
   - dimension: CONSISTENCY
-    name: bill_currency_matches_customer_registered_currency
+    name: bill-currency-matches-customer-currency
     sqlAssertion:
       sqlStatement: >
         SELECT b.account_id FROM `${PROJECT_ID}.utility_bills.staging` b
@@ -91,7 +91,6 @@ rules:
         JOIN `${PROJECT_ID}.utility_bills.customer_staging` c
           ON c.customer_id = ud.customer_id
         WHERE b.currency != c.registered_currency
-    threshold: 1.0
 
 postScanActions:
   bigqueryExport:

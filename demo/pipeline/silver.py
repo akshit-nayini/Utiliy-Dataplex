@@ -42,8 +42,10 @@ def build_silver_table(
 
     where_clause = ""
     if failing_rules:
+        # Dataplex's auto-generated failing_rows_query ends with a trailing
+        # ";", which breaks once wrapped in "FROM (...)" - strip it first.
         bad_keys_union = "\nUNION ALL\n".join(
-            f"SELECT {key_column} FROM ({r['failing_rows_query']})" for r in failing_rules
+            f"SELECT {key_column} FROM ({r['failing_rows_query'].strip().rstrip(';')})" for r in failing_rules
         )
         where_clause = f"WHERE {key_column} NOT IN (\n{bad_keys_union}\n)"
 

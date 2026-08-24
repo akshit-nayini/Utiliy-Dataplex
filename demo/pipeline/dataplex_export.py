@@ -1,6 +1,6 @@
 """Runs the Dataplex Auto DQ scan, then turns its findings into a Parquet
-file of bad records in GCS, registered as a Fileset entry in Data Catalog /
-Dataplex Catalog. Same pattern as the main framework's
+file of bad records in GCS, registered as an entry in Dataplex Universal
+Catalog (aka Knowledge Catalog). Same pattern as the main framework's
 pipeline/dataplex_export.py, trimmed to one table and copied here so the
 demo is fully self-contained.
 """
@@ -10,7 +10,8 @@ from typing import Dict, List
 
 from google.cloud import bigquery
 from google.cloud import dataplex_v1
-from google.cloud import datacatalog_v1
+
+from .catalog import upsert_entry
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,10 @@ def run_scan_and_wait(project: str, location: str, data_scan_id: str, poll_secon
 def get_scan_job_rule_results(project: str, location: str, data_scan_id: str, job_id: str) -> List[Dict]:
     client = dataplex_v1.DataScanServiceClient()
     job_name = client.data_scan_job_path(project, location, data_scan_id, job_id)
-    job = client.get_data_scan_job(name=job_name, view=dataplex_v1.GetDataScanJobRequest.DataScanJobView.FULL)
+    request = dataplex_v1.GetDataScanJobRequest(
+        name=job_name, view=dataplex_v1.GetDataScanJobRequest.DataScanJobView.FULL
+    )
+    job = client.get_data_scan_job(request=request)
 
     results = []
     for rule in job.data_quality_result.rules:
@@ -69,42 +73,62 @@ def export_bad_records_to_parquet(
     rule_results: List[Dict],
     gcs_bucket: str,
 ) -> Dict:
+    """Materializes every failing rule's bad records into a BigQuery table
+    - kept (not dropped), so it shows up in the Dataplex Universal Catalog /
+    Knowledge Catalog dashboard automatically (BigQuery tables are
+    auto-cataloged with a full schema and a data Preview tab - no
+    registration code needed for that part). The same table is then
+    extracted to Parquet in GCS as a portable archival copy, and that
+    Parquet file gets its own generic catalog entry (see
+    register_parquet_quarantine_in_catalog) with a text summary.
+
+    quarantine_orders is overwritten (CREATE OR REPLACE) on every run, so
+    it always reflects the latest scan - open it directly in BigQuery or
+    via the catalog's Preview tab to see the actual bad rows, not just
+    counts.
+    """
     failing_rules = [r for r in rule_results if r["failing_row_count"] > 0 and r["failing_rows_query"]]
     if not failing_rules:
         logger.info("No failing rules with data for job %s - nothing to export", job_id)
-        return {"gcs_uri": None, "total_rows": 0, "breakdown": []}
+        return {"gcs_uri": None, "total_rows": 0, "breakdown": [], "bigquery_table": None}
 
     client = bigquery.Client(project=project)
-    temp_table = f"{project}.{admin_dataset}.quarantine_export_orders_{job_id}"
+    quarantine_table = f"{project}.{admin_dataset}.quarantine_orders"
 
+    # Dataplex's auto-generated failing_rows_query ends with a trailing ";",
+    # which breaks once wrapped in "FROM (...)" - strip it before embedding.
     union_parts = [
         f"""
-        SELECT *, '{r['rule_name']}' AS failed_rule, '{r['dimension']}' AS dimension
-        FROM ({r['failing_rows_query']})
+        SELECT *, '{r['rule_name']}' AS failed_rule, '{r['dimension']}' AS dimension, '{job_id}' AS scan_job_id
+        FROM ({r['failing_rows_query'].strip().rstrip(';')})
         """
         for r in failing_rules
     ]
-    client.query(f"CREATE OR REPLACE TABLE `{temp_table}` AS\n" + "\nUNION ALL\n".join(union_parts)).result()
+    client.query(f"CREATE OR REPLACE TABLE `{quarantine_table}` AS\n" + "\nUNION ALL\n".join(union_parts)).result()
 
     breakdown = [
         dict(row)
         for row in client.query(
-            f"SELECT failed_rule, dimension, COUNT(*) AS row_count FROM `{temp_table}` GROUP BY 1, 2 ORDER BY row_count DESC"
+            f"SELECT failed_rule, dimension, COUNT(*) AS row_count FROM `{quarantine_table}` GROUP BY 1, 2 ORDER BY row_count DESC"
         ).result()
     ]
     total_rows = sum(b["row_count"] for b in breakdown)
 
     gcs_uri_prefix = f"gs://{gcs_bucket}/quarantine/orders/{job_id}"
     extract_job = client.extract_table(
-        temp_table,
+        quarantine_table,
         destination_uris=[f"{gcs_uri_prefix}/part-*.parquet"],
         job_config=bigquery.ExtractJobConfig(destination_format=bigquery.DestinationFormat.PARQUET),
     )
     extract_job.result()
-    client.delete_table(temp_table, not_found_ok=True)
 
-    logger.info("Exported %d bad records for job %s to %s", total_rows, job_id, gcs_uri_prefix)
-    return {"gcs_uri": f"{gcs_uri_prefix}/*.parquet", "total_rows": total_rows, "breakdown": breakdown}
+    logger.info("Exported %d bad records for job %s to %s and kept table %s", total_rows, job_id, gcs_uri_prefix, quarantine_table)
+    return {
+        "gcs_uri": f"{gcs_uri_prefix}/*.parquet",
+        "total_rows": total_rows,
+        "breakdown": breakdown,
+        "bigquery_table": quarantine_table,
+    }
 
 
 def register_parquet_quarantine_in_catalog(project: str, location: str, entry_group_id: str, export_result: Dict):
@@ -112,29 +136,14 @@ def register_parquet_quarantine_in_catalog(project: str, location: str, entry_gr
         logger.info("Nothing exported - skipping catalog registration")
         return
 
-    client = datacatalog_v1.DataCatalogClient()
-    parent = datacatalog_v1.DataCatalogClient.common_location_path(project, location)
-    entry_group_name = datacatalog_v1.DataCatalogClient.entry_group_path(project, location, entry_group_id)
-    try:
-        client.get_entry_group(name=entry_group_name)
-    except Exception:
-        client.create_entry_group(parent=parent, entry_group_id=entry_group_id, entry_group={})
-
-    entry_id = "orders_quarantine"
-    entry = datacatalog_v1.types.Entry()
-    entry.display_name = "Demo Orders - quarantine (bad records)"
-    entry.type_ = datacatalog_v1.types.EntryType.FILESET
-    entry.gcs_fileset_spec = datacatalog_v1.types.GcsFilesetSpec(file_patterns=[export_result["gcs_uri"]])
-    entry.description = (
-        f"Dataplex DQ scan bad records for demo orders: {export_result['total_rows']} rows. "
-        f"Breakdown: {export_result['breakdown']}"
+    upsert_entry(
+        project, location, entry_group_id, "orders-quarantine",
+        display_name="Demo Orders - quarantine (bad records)",
+        description=(
+            f"Dataplex DQ scan bad records for demo orders: {export_result['total_rows']} rows. "
+            f"Browse the actual rows in BigQuery table {export_result.get('bigquery_table')} "
+            f"(auto-cataloged with a Preview tab) or the archival Parquet copy at "
+            f"{export_result['gcs_uri']}. Breakdown: {export_result['breakdown']}"
+        ),
+        resource=export_result["gcs_uri"],
     )
-
-    entry_name = client.entry_path(project, location, entry_group_id, entry_id)
-    try:
-        entry.name = entry_name
-        client.update_entry(entry=entry)
-        logger.info("Updated quarantine Fileset entry %s", entry_name)
-    except Exception:
-        client.create_entry(parent=entry_group_name, entry_id=entry_id, entry=entry)
-        logger.info("Created quarantine Fileset entry %s", entry_name)
