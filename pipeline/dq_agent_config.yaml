@@ -1,8 +1,13 @@
 dq_agent:
   name: utility_bills_dq_agent
   owner: data-eng-team
-  enforce_block_threshold: 0.01  # block if invalid ratio > 1%
-  enforce_block_count: 100       # or if > 100 invalid rows
+  # All data is ingested (pipeline/loader.py) - validation is Dataplex's
+  # job, run against the staging table after load. These thresholds are
+  # informational only, for the alert in dq_metrics/catalog; they never
+  # stop ingestion.
+  alert_threshold: 0.01  # alert if invalid ratio > 1%
+  alert_count: 100        # or if > 100 invalid rows
+  quarantine_gcs_bucket: utility-bills-quarantine  # bad records land here as Parquet, per source/scan job
   knowledge_catalog:
     use_ai_segmentation: true
     ai_model: knowledge-catalog-default

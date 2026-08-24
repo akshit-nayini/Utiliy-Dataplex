@@ -1,0 +1,71 @@
+# Dataplex Auto Data Quality scan definition for the demo `orders` table.
+# Deploy with:
+#   gcloud dataplex datascans create data-quality orders-dq-scan \
+#     --project=<PROJECT_ID> --location=us-central1 \
+#     --data-source-resource=//bigquery.googleapis.com/projects/<PROJECT_ID>/datasets/dq_demo/tables/orders_bronze \
+#     --data-quality-spec-file=demo/dataplex/dq_scan_orders.yaml
+#
+# Config-only, no custom scanning code. `orders_bronze` is all-STRING
+# (see demo/pipeline/loader.py), so every rule either checks the string
+# directly (regex/set/non-null) or SAFE_CASTs it first (amount).
+
+rules:
+  - column: order_id
+    dimension: VALIDITY
+    name: order_id_not_null
+    nonNullExpectation: {}
+    threshold: 1.0
+
+  - column: order_id
+    dimension: VALIDITY
+    name: order_id_format
+    regexExpectation:
+      regex: '^ORD[0-9]{6}$'
+    threshold: 1.0
+
+  - column: order_id
+    dimension: UNIQUENESS
+    name: order_id_unique
+    uniquenessExpectation: {}
+    threshold: 1.0
+
+  - column: customer_email
+    dimension: VALIDITY
+    name: customer_email_not_null
+    nonNullExpectation: {}
+    threshold: 1.0
+
+  - column: customer_email
+    dimension: VALIDITY
+    name: customer_email_format
+    regexExpectation:
+      regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    threshold: 1.0
+
+  - column: status
+    dimension: VALIDITY
+    name: status_allowed_values
+    setExpectation:
+      values: ['PENDING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
+    threshold: 1.0
+
+  - column: order_date
+    dimension: VALIDITY
+    name: order_date_format
+    regexExpectation:
+      regex: '^\d{4}-\d{2}-\d{2}$'
+    threshold: 1.0
+
+  # amount is ingested as STRING - one sqlAssertion covers both
+  # "is it a number" and "is it >= 0".
+  - dimension: VALIDITY
+    name: amount_is_non_negative_number
+    sqlAssertion:
+      sqlStatement: >
+        SELECT order_id FROM `${PROJECT_ID}.dq_demo.orders_bronze`
+        WHERE SAFE_CAST(amount AS FLOAT64) IS NULL OR SAFE_CAST(amount AS FLOAT64) < 0
+    threshold: 1.0
+
+postScanActions:
+  bigqueryExport:
+    resultsTable: projects/${PROJECT_ID}/datasets/dq_demo/tables/dataplex_dq_results

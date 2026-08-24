@@ -1,11 +1,16 @@
-"""Gates ingestion on Dataplex Auto Data Quality scan results.
+"""Reads Dataplex Auto Data Quality scan results for reporting/alerting.
 
-Dataplex runs the rules in dataplex/dq_scan_utility_bills.yaml against the
-staging table and exports one row per (rule, column) to a BigQuery results
-table (dq_agent_config.yaml: dataplex_scan.results_table). This module reads
-that export for a given scan job and decides, using the DQ agent's
-thresholds, whether the file's rows may be promoted to the curated table or
-must be quarantined / ingestion stopped.
+Dataplex runs the rules in dataplex/dq_scan_*.yaml against each staging
+table and exports one row per (rule, column) to a BigQuery results table
+(dq_agent_config.yaml: dataplex_scan.results_table). This module reads that
+export for a given scan job and computes the invalid ratio/count against
+the DQ agent's alert thresholds.
+
+This is monitoring only - it never stops ingestion. Bad rows are always
+routed to the quarantine table (pipeline/quarantine.py) and the rest of
+the batch keeps processing regardless of how this evaluates. `alert=True`
+just means the DQ agent should notify someone; the pipeline does not act
+on it by blocking anything.
 """
 import logging
 from typing import Dict, List
@@ -33,35 +38,37 @@ def fetch_scan_results(project: str, results_dataset: str, results_table: str, j
 
 
 def evaluate(results: List[Dict], dq_agent_cfg: Dict) -> Dict:
-    """Applies enforce_block_threshold / enforce_block_count to scan results.
+    """Applies alert_threshold / alert_count to scan results for reporting.
 
-    Returns a decision dict: {'block': bool, 'reason': str, 'failed_rules': [...]}
+    Returns a decision dict: {'alert': bool, 'reason': str, 'failed_rules': [...]}
+    `alert` never stops the pipeline - it's surfaced in dq_metrics / Data
+    Catalog so the DQ agent owner can be notified.
     """
-    block_threshold = dq_agent_cfg.get('enforce_block_threshold', 0.01)
-    block_count = dq_agent_cfg.get('enforce_block_count', 100)
+    alert_threshold = dq_agent_cfg.get('alert_threshold', dq_agent_cfg.get('enforce_block_threshold', 0.01))
+    alert_count = dq_agent_cfg.get('alert_count', dq_agent_cfg.get('enforce_block_count', 100))
 
     total_evaluated = sum(r.get('evaluated_row_count', 0) for r in results) or 1
     total_failing = sum(r.get('failing_row_count', 0) for r in results)
     failed_rules = [r for r in results if not r.get('passed', True)]
 
     invalid_ratio = total_failing / total_evaluated
-    block = invalid_ratio > block_threshold or total_failing > block_count
+    alert = invalid_ratio > alert_threshold or total_failing > alert_count
 
     reason = None
-    if block:
+    if alert:
         reason = (
-            f"invalid_ratio={invalid_ratio:.4f} > threshold={block_threshold} "
-            f"or failing_rows={total_failing} > max={block_count}"
+            f"invalid_ratio={invalid_ratio:.4f} > threshold={alert_threshold} "
+            f"or failing_rows={total_failing} > max={alert_count}"
         )
-        logger.warning('Dataplex DQ gate BLOCKING ingestion: %s', reason)
+        logger.warning('Dataplex DQ ALERT (informational only, ingestion continues): %s', reason)
     else:
         logger.info(
-            'Dataplex DQ gate PASSED: invalid_ratio=%.4f, failing_rows=%d',
+            'Dataplex DQ within threshold: invalid_ratio=%.4f, failing_rows=%d',
             invalid_ratio, total_failing,
         )
 
     return {
-        'block': block,
+        'alert': alert,
         'reason': reason,
         'invalid_ratio': invalid_ratio,
         'total_failing_rows': total_failing,
@@ -69,7 +76,7 @@ def evaluate(results: List[Dict], dq_agent_cfg: Dict) -> Dict:
     }
 
 
-def gate_scan_job(project: str, dq_agent_cfg: Dict, job_id: str) -> Dict:
+def check_scan_job(project: str, dq_agent_cfg: Dict, job_id: str) -> Dict:
     scan_cfg = dq_agent_cfg['dataplex_scan']
     results = fetch_scan_results(
         project, scan_cfg['results_dataset'], scan_cfg['results_table'], job_id

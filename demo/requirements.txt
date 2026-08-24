@@ -1,0 +1,10 @@
+# Minimal dependencies to run demo/run_demo.py locally against a real GCP project.
+google-cloud-bigquery==3.11.0
+google-cloud-storage==2.10.0
+google-cloud-dataplex==1.9.0
+google-cloud-datacatalog==3.15.0
+PyYAML==6.0
+
+# Only needed to regenerate demo/data/sample_orders.parquet
+# (python demo/data/generate_sample_orders.py) - not needed to run the demo itself.
+pyarrow==17.0.0

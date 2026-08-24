@@ -6,9 +6,12 @@
 #     --data-quality-spec-file=dataplex/dq_scan_utility_bills.yaml
 #
 # This is config-only: no custom scanning code. Dataplex executes these rules
-# against the staging table and writes one row per rule per column to the
-# results export table (see dq_agent_config.yaml: dataplex_results_table).
-# pipeline/dataplex_gate.py reads that export to decide pass/fail per file.
+# against the staging table (all-STRING columns - see pipeline/loader.py,
+# which ingests every row as-is before this scan runs) and writes one row
+# per rule per column to the results export table (see dq_agent_config.yaml:
+# dataplex_scan.results_table). pipeline/dataplex_gate.py reads that export
+# for reporting; pipeline/dataplex_export.py uses each rule's auto-generated
+# failing_rows_query to pull the actual bad records into a Parquet file.
 
 rules:
   - column: account_id
@@ -38,11 +41,15 @@ rules:
     nonNullExpectation: {}
     threshold: 1.0
 
-  - column: amount
-    dimension: VALIDITY
-    rangeExpectation:
-      minValue: '0'
-      strictMinEnabled: false
+  # amount is ingested as STRING (pipeline/loader.py loads every column as
+  # STRING so no row is ever rejected at load time) - so both "is it a
+  # number" and "is it >= 0" are expressed as one sqlAssertion.
+  - dimension: VALIDITY
+    name: amount_is_non_negative_number
+    sqlAssertion:
+      sqlStatement: >
+        SELECT account_id FROM `${PROJECT_ID}.utility_bills.staging`
+        WHERE SAFE_CAST(amount AS FLOAT64) IS NULL OR SAFE_CAST(amount AS FLOAT64) < 0
     threshold: 1.0
 
   - column: currency

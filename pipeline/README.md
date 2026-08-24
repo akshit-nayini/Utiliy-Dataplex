@@ -1,18 +1,21 @@
-This folder contains a minimal validation pipeline, shared by the Airflow
-DAG and the Dataflow pipeline, for three sources: customer,
-utility_details, and utility_bills.
+This folder contains a minimal ingestion + Dataplex-export pipeline,
+shared by the Airflow DAG and the Dataflow pipeline, for three sources:
+customer, utility_details, and utility_bills. All data is ingested as-is;
+validation is entirely Dataplex's job, run against the staging tables
+after load.
 
 Usage
-- Validation schemas: `schemas/customer_schema.yaml`, `schemas/utility_details_schema.yaml`, `schemas/utility_bill_schema.yaml`.
-- Configure Airflow DAG `airflow_dags/validate_ingest_dag.py` with project, buckets, dataset/table.
+- Dataplex scan specs (the actual validation rules): `dataplex/dq_scan_customer.yaml`, `dq_scan_utility_details.yaml`, `dq_scan_utility_bills.yaml`.
+- Configure Airflow DAG `airflow_dags/validate_ingest_dag.py` with project and raw bucket.
 - Install requirements in Composer environment or a virtualenv: `pip install -r requirements.txt`.
 
 Files
-- `validator.py`: lists GCS files, validates rows, writes valid rows to BigQuery and invalid rows to DLQ in GCS.
-- `validators.py`: schema-driven per-column checks, shared with the Dataflow pipeline (`dataflow/beam_dq_pipeline.py`).
+- `loader.py`: bulk-loads every row of every file under a source's GCS prefix into its (all-`STRING`) BigQuery staging table - nothing is filtered.
+- `dataplex_gate.py`: reads a source's Dataplex Auto DQ scan results and computes an informational `alert` flag against the DQ agent's thresholds. Never blocks or stops anything - purely for reporting/notification.
+- `dataplex_export.py`: pulls every failed rule's auto-generated `failing_rows_query` from a Dataplex scan job, unions the actual bad records into a Parquet file in GCS, and registers that file as a Fileset entry in Data Catalog / Dataplex Catalog (with a DQ breakdown by rule) so bad records are visible on that dashboard.
+- `consolidate.py`: joins the three staging tables (customer, utility_details, utility_bills) into the single `utility_bills_consolidated` output table - an `INNER JOIN` plus a currency-match filter, mirroring the same cross-table conditions Dataplex's `sqlAssertion` rules check.
 - `dq_reporting.py`: records DQ metrics to BigQuery and registers dataset metadata in Data Catalog / Knowledge Catalog (Dataplex integration).
-- `dq_agent_config.yaml`: per-source thresholds, Dataplex DQ scan references, consolidated output table name, and Knowledge Catalog AI segregation (config-only).
-- `dataplex_gate.py`: reads a source's Dataplex Auto DQ scan results and decides whether to promote or block ingestion based on the DQ agent's thresholds.
-- `consolidate.py`: joins the three staging tables (customer, utility_details, utility_bills) into the single `utility_bills_consolidated` output table, enforcing referential integrity and currency consistency at the row level.
+- `dq_agent_config.yaml`: per-source alert thresholds, Dataplex DQ scan references, the quarantine GCS bucket, consolidated output table name, and Knowledge Catalog AI segregation (config-only).
+- `validators.py`: kept as a reference/utility module for schema-driven rule definitions; not used for row filtering anymore (that logic now lives in `dataplex/dq_scan_*.yaml`).
 
-See the top-level [README.md](../README.md) for the full Airflow vs. Dataflow architecture and the Dataplex scan spec under `dataplex/`.
+See the top-level [README.md](../README.md) for the full Airflow vs. Dataflow architecture and the Dataplex scan specs under `dataplex/`.

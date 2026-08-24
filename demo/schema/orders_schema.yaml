@@ -1,0 +1,25 @@
+# Reference column definitions for the demo `orders` table. This mirrors
+# what dataplex/dq_scan_orders.yaml actually enforces - kept here purely as
+# human-readable documentation of the rules, same convention as the main
+# framework's schemas/*.yaml.
+columns:
+  order_id:
+    type: string
+    required: true
+    regex: '^ORD[0-9]{6}$'
+  customer_email:
+    type: string
+    required: true
+    regex: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+  amount:
+    type: float
+    required: true
+    min: 0
+  status:
+    type: string
+    required: true
+    allowed_values: ['PENDING', 'SHIPPED', 'DELIVERED', 'CANCELLED']
+  order_date:
+    type: string
+    required: true
+    regex: '^\d{4}-\d{2}-\d{2}$'

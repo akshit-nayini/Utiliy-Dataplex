@@ -1,14 +1,16 @@
 """Follow-on step after the three Dataflow loads (customer, utility_details,
-utility_bills): gate each source on its own Dataplex Auto DQ scan (the
-utility_bills scan also carries the cross-table referential/consistency
-sqlAssertion rules), then build the single consolidated output table and
-register DQ metrics + lineage in Data Catalog (Knowledge Catalog).
+utility_bills): for each source's Dataplex Auto DQ scan job, pull the
+actual bad records via each failed rule's failing_rows_query, export them
+to a Parquet file in GCS, and register that file in Data Catalog /
+Dataplex Catalog so it's visible on that dashboard. Then build the single
+consolidated output table and register it too.
+
+Nothing here removes data from the staging tables or blocks anything -
+Dataplex scan alerts are logged for the DQ agent owner but consolidation
+always runs regardless.
 
 Trigger from a Cloud Composer task or a Cloud Function subscribed to the
-Dataflow job-completion Pub/Sub notification for all three jobs. Reuses the
-same pipeline.dataplex_gate / pipeline.consolidate / pipeline.dq_reporting
-modules as the Airflow DAG so both architectures apply identical
-thresholds, joins, and catalog registration.
+Dataflow job-completion Pub/Sub notification for all three jobs.
 
 Usage:
   python -m dataflow.post_scan_gate --project=$PROJECT \
@@ -21,7 +23,8 @@ import logging
 
 import yaml
 
-from pipeline.dataplex_gate import gate_scan_job
+from pipeline.dataplex_gate import check_scan_job
+from pipeline.dataplex_export import get_scan_job_rule_results, export_bad_records_to_parquet, register_parquet_quarantine_in_catalog
 from pipeline.consolidate import build_consolidated_table
 from pipeline.dq_reporting import write_metrics_to_bq, register_dataset_in_datacatalog
 
@@ -48,16 +51,25 @@ def main():
         dq_agent_cfg = yaml.safe_load(f)["dq_agent"]
 
     sources = dq_agent_cfg["sources"]
+    catalog_cfg = dq_agent_cfg["knowledge_catalog"]
+    location = dq_agent_cfg["dataplex_scan"]["location"]
+    admin_dataset = dq_agent_cfg["reporting"]["bq_dataset"]
+
     decisions = {}
     for source_name in sources:
-        decision = gate_scan_job(args.project, dq_agent_cfg, job_ids[source_name])
-        decisions[source_name] = decision
-        if decision["block"]:
-            logger.error("Ingestion stopped for %s by DQ agent: %s", source_name, decision["reason"])
+        job_id = job_ids[source_name]
 
-    if any(d["block"] for d in decisions.values()):
-        logger.error("Skipping consolidation - one or more sources failed their DQ gate")
-        return
+        # informational only - logged for the DQ agent owner, never blocks
+        decision = check_scan_job(args.project, dq_agent_cfg, job_id)
+        decisions[source_name] = decision
+        if decision["alert"]:
+            logger.warning("DQ alert for %s (informational, ingestion continues): %s", source_name, decision["reason"])
+
+        rule_results = get_scan_job_rule_results(args.project, location, sources[source_name]["data_scan_id"], job_id)
+        export_result = export_bad_records_to_parquet(
+            args.project, admin_dataset, source_name, job_id, rule_results, dq_agent_cfg["quarantine_gcs_bucket"]
+        )
+        register_parquet_quarantine_in_catalog(args.project, catalog_cfg, source_name, export_result)
 
     consolidation = build_consolidated_table(
         args.project, dq_agent_cfg["staging_dataset"],
@@ -68,7 +80,6 @@ def main():
     )
 
     reporting_cfg = dq_agent_cfg["reporting"]
-    catalog_cfg = dq_agent_cfg["knowledge_catalog"]
     bills_decision = decisions["utility_bills"]
 
     write_metrics_to_bq(

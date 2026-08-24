@@ -1,14 +1,17 @@
-"""Builds the single consolidated output table from the three validated
-staging tables (customer, utility_details, utility_bills).
+"""Builds the single consolidated output table from the three staging
+tables (customer, utility_details, utility_bills).
 
-The join itself enforces the cross-table checks a second time at the row
-level: an INNER JOIN drops any bill whose account has no utility_details
-record, or whose utility_details has no matching customer (referential
-integrity), and the WHERE clause drops any bill whose currency doesn't
-match its customer's registered currency (attribute consistency). Rows
-dropped here were already flagged by the Dataplex sqlAssertion rules in
-dataplex/dq_scan_utility_bills.yaml; this just materializes the clean,
-denormalized result the DQ agent promotes to.
+Validation itself is Dataplex's job (dataplex/dq_scan_*.yaml), run against
+the staging tables after pipeline/loader.py ingests every row - see
+pipeline/dataplex_export.py for how Dataplex's scan results become a
+visible Parquet quarantine file per source. This module is just the join:
+an INNER JOIN naturally excludes any bill whose account has no
+utility_details record or whose utility_details has no matching customer
+(the same referential-integrity condition Dataplex's cross-table
+sqlAssertion rules flag), and the WHERE clause excludes any bill whose
+currency doesn't match its customer's registered currency (the same
+attribute-consistency condition). Nothing here removes rows from staging -
+only from this derived view.
 """
 import logging
 
@@ -29,7 +32,7 @@ SELECT
     ud.meter_id,
     ud.region AS utility_region,
     b.bill_date,
-    b.amount,
+    SAFE_CAST(b.amount AS FLOAT64) AS amount,
     b.currency
 FROM `{project}.{dataset}.{bills_table}` b
 JOIN `{project}.{dataset}.{utility_details_table}` ud ON ud.account_id = b.account_id
