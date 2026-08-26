@@ -1,11 +1,29 @@
 # Demo: One-Table Bronze → Silver → Gold Pipeline
 
 A minimal, self-contained pipeline built to let you **test every service in
-the main framework in isolation, in under 15 minutes**, without standing up
-Composer or Dataflow. One table lineage (`orders`: Bronze → Silver → Gold),
-one GCS bucket for input, one GCS bucket for bad-record output, one
-Dataplex scan, one Dataplex Universal Catalog (Knowledge Catalog) entry
-group. Everything runs from a single Python script, [run_demo.py](run_demo.py).
+the main framework in isolation**. One table lineage (`orders`: Bronze →
+Silver → Gold), one GCS bucket for input, one GCS bucket for bad-record
+output, one Dataplex scan, one Dataplex Universal Catalog (Knowledge
+Catalog) entry group - and three interchangeable ways to trigger the
+pipeline, so **GCS, BigQuery, Dataplex, Knowledge Catalog, Dataflow,
+Pub/Sub, and Airflow** all get exercised somewhere in this folder:
+
+| # | How it runs | Time | What it adds over Option 0 |
+|---|---|---|---|
+| **0** | [run_demo.py](run_demo.py) - one process, synchronous | ~2 min | Nothing extra - fastest way to check the whole flow works |
+| **1** | [dataflow/beam_ingest.py](dataflow/beam_ingest.py) (Dataflow/Beam) publishes to **Pub/Sub** on completion; [pubsub_listener.py](pubsub_listener.py) picks it up | ~5 min | Exercises Dataflow and Pub/Sub; ingestion and validation run as two decoupled processes, like a real event-driven pipeline |
+| **2** | [airflow_dags/demo_orders_dag.py](airflow_dags/demo_orders_dag.py) | ~10-25 min | Exercises Airflow - runnable locally (`airflow standalone`, no Composer cost) or on a real Composer environment |
+
+All three call the exact same [pipeline/loader.py](pipeline/loader.py) and
+[pipeline/post_ingest.py](pipeline/post_ingest.py) code - only the
+trigger/orchestration differs, the same way the main framework's Airflow
+and Dataflow architectures share code and differ only in orchestration.
+
+**For a detailed, component-by-component reference and the full system
+architecture (diagrams for all three options, a data model table, a GCP
+services/IAM matrix, and a purpose/inputs/outputs writeup for every single
+file), see [ARCHITECTURE.md](ARCHITECTURE.md).** This README stays focused
+on getting a first run working.
 
 Catalog registration uses `dataplex_v1.CatalogServiceClient`
 ([pipeline/catalog.py](pipeline/catalog.py)), not the older
@@ -48,6 +66,9 @@ flowchart LR
 | **BigQuery** | Bronze is bulk-loaded unfiltered; Silver, Gold, and `quarantine_orders` (the actual bad rows, kept and overwritten each run) are derived tables rebuilt (`CREATE OR REPLACE`) on every run |
 | **Dataplex (Data Quality)** | A Dataplex Auto DQ scan validates Bronze against 8 rules (not-null, regex format, allowed values, numeric range, uniqueness) - this is the actual validation engine, not custom Python code, and it's also what decides which rows make it into Silver |
 | **Dataplex Universal Catalog / Knowledge Catalog** | Three entries appear in the catalog (`dataplex_v1.CatalogServiceClient`, the generic system entry type - no custom EntryType/AspectType setup needed): `orders-bronze` and `orders-gold` (each with a DQ/row-count summary in their description) and `orders-quarantine`, whose linked resource is the bad-records Parquet file and whose description points to the `quarantine_orders` BigQuery table. That table is a *fourth*, unregistered piece of catalog visibility: because it's a real BigQuery table, Dataplex auto-catalogs it with its own schema and a data **Preview** tab, showing the actual failed rows - no registration code needed for that part |
+| **Dataflow** (Option 1) | [dataflow/beam_ingest.py](dataflow/beam_ingest.py) reads the Parquet file with `beam.io.ReadFromParquet` and writes every row to Bronze with `beam.io.WriteToBigQuery` - runnable with `DirectRunner` (local, fast) or `DataflowRunner` (the actual managed service) |
+| **Pub/Sub** (Option 1) | `beam_ingest.py` publishes an ingest-complete message after the Beam job finishes; [pubsub_listener.py](pubsub_listener.py) subscribes and triggers `pipeline.post_ingest` on receipt - decoupling ingestion from validation the way a real streaming/event-driven pipeline would |
+| **Airflow** (Option 2) | [airflow_dags/demo_orders_dag.py](airflow_dags/demo_orders_dag.py): a `GCSObjectExistenceSensor` waits for the file, then two `PythonOperator` tasks run `pipeline.loader` and `pipeline.post_ingest` - runnable via `airflow standalone` locally or on Cloud Composer |
 
 ## The data
 
@@ -102,7 +123,7 @@ convention as the main framework. The eight rules:
 8. `amount` is a non-negative number (one `sqlAssertion`, since the column
    is ingested as `STRING`)
 
-## How a run works (what [run_demo.py](run_demo.py) does)
+## Option 0: run_demo.py (one process, synchronous)
 
 1. **Bronze** - `pipeline/loader.py` bulk-loads every row of the Parquet
    file into `orders_bronze`. Nothing is filtered; malformed values can't
@@ -115,18 +136,61 @@ convention as the main framework. The eight rules:
 4. **Quarantine** - for every failed rule, Dataplex hands back a
    `failing_rows_query`: the actual SQL it used to find the bad rows.
    `dataplex_export.export_bad_records_to_parquet()` runs each of those,
-   unions the results (tagged with which rule/dimension failed), extracts
-   them to a Parquet file in your quarantine bucket, and registers that
-   file as the `orders-quarantine` catalog entry (`pipeline/catalog.py`).
+   unions the results (tagged with which rule/dimension failed) into the
+   kept `quarantine_orders` BigQuery table, extracts that to a Parquet
+   file in your quarantine bucket, and registers the `orders-quarantine`
+   catalog entry (`pipeline/catalog.py`).
 5. **Silver** - `pipeline/silver.py` rebuilds `orders_silver` from Bronze,
    excluding any row whose key showed up in a `failing_rows_query`, and
    casting `amount`/`order_date` to real types.
 6. **Gold** - `pipeline/gold.py` rebuilds `orders_gold`: order count, total
    revenue, and average order value grouped by `status`, from Silver.
-7. **Catalog** - `orders_bronze` and `orders_gold` are each registered with
+7. **Catalog** - `orders-bronze` and `orders-gold` are each registered with
    a summary (rows loaded/quarantined for Bronze, row count for Gold) -
    all three catalog entries land on the same Dataplex Universal Catalog
    dashboard.
+
+Steps 2-7 live in [pipeline/post_ingest.py](pipeline/post_ingest.py)'s
+`run_post_ingest()` - the same function Options 1 and 2 call, so the
+actual validation/quarantine/Silver/Gold/catalog logic is identical no
+matter how Bronze got loaded.
+
+## Option 1: Dataflow + Pub/Sub
+
+```mermaid
+flowchart LR
+    PARQ[sample_orders.parquet] -->|ReadFromParquet| BEAM[beam_ingest.py\nDataflow/Beam job]
+    BEAM -->|WriteToBigQuery| BRZ[(orders_bronze)]
+    BEAM -->|publish on completion| TOPIC[[Pub/Sub topic\ndq-demo-ingest-complete]]
+    TOPIC --> SUB[[subscription]]
+    SUB -->|pubsub_listener.py| POST[pipeline.post_ingest\nsame code as Option 0 steps 2-7]
+```
+
+`dataflow/beam_ingest.py` reads the Parquet file and writes every row to
+Bronze as a Beam pipeline (run it with `--runner=DirectRunner` for a local
+test against real GCP resources, or `--runner=DataflowRunner` to actually
+use the Dataflow service), then publishes a Pub/Sub message.
+`pubsub_listener.py` (run separately, ideally started *before* the
+Dataflow job so it's already listening) picks up that message and calls
+`pipeline.post_ingest.run_post_ingest()` - the identical function
+`run_demo.py` calls in-process. See [DEPLOYMENT.md](DEPLOYMENT.md) for the
+exact commands, including creating the topic/subscription.
+
+This is the concrete, runnable version of the "wire this into a Cloud
+Function on the Dataflow job-completion Pub/Sub topic" pattern the main
+framework's README describes for its Dataflow architecture but doesn't
+implement as code - here it's an actual working Pub/Sub round trip.
+
+## Option 2: Airflow
+
+`airflow_dags/demo_orders_dag.py` has three tasks: `wait_for_sample_file`
+(a `GCSObjectExistenceSensor`), `load_bronze` (calls `pipeline.loader`),
+and `validate_quarantine_silver_gold_catalog` (calls
+`pipeline.post_ingest.run_post_ingest()` - again, the same function).
+
+Run it locally in Cloud Shell without any Composer cost - see the header
+of `demo_orders_dag.py` for the exact `airflow standalone` commands - or
+deploy it to a real Cloud Composer environment per [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Prerequisites
 
@@ -136,9 +200,10 @@ convention as the main framework. The eight rules:
   principal that has the IAM roles listed in DEPLOYMENT.md.
 - Python 3.9+.
 
-## Quick start
+## Quick start (Option 0)
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact commands. In short:
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact commands, including
+Options 1 and 2. In short, for Option 0:
 
 ```bash
 pip install -r demo/requirements.txt

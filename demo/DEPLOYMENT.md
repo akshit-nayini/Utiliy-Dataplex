@@ -1,7 +1,8 @@
 # Demo Deployment Guide
 
-One-time setup plus the single command to run the demo end-to-end. Takes
-about 10-15 minutes including Dataplex scan creation propagation time.
+One-time setup, then three ways to actually run the demo (§6a/6b/6c) -
+pick whichever matches what you want to test. Section numbering matches
+the shared setup steps 0-5 and 7-9; only step 6 branches by option.
 Commands are `bash`/`gcloud` - translate to PowerShell if running directly
 on Windows rather than Cloud Shell.
 
@@ -18,18 +19,28 @@ gcloud services enable \
   storage.googleapis.com \
   dataplex.googleapis.com \
   datacatalog.googleapis.com \
+  pubsub.googleapis.com \
+  dataflow.googleapis.com \
+  composer.googleapis.com \
   --project=${PROJECT_ID}
 ```
+
+(`pubsub`/`dataflow` are only needed for Option 1, `composer` only if you
+deploy Option 2 to a real Composer environment rather than running it
+locally - enabling all of them up front avoids switching back later.)
 
 IAM: your user or service account needs `roles/bigquery.dataEditor`,
 `roles/bigquery.jobUser`, `roles/storage.objectAdmin` (on both buckets),
 `roles/dataplex.dataScanEditor`, and `roles/dataplex.catalogEditor` (create/
 update entry groups and entries in Dataplex Universal Catalog / Knowledge
 Catalog - the old `roles/datacatalog.entryGroupOwner` is for the deprecated
-Data Catalog write API and won't work on projects where it's blocked).
+Data Catalog write API and won't work on projects where it's blocked). For
+Option 1 also add `roles/pubsub.editor` and `roles/dataflow.developer`
+(plus `roles/iam.serviceAccountUser` if running on the Dataflow service
+under a non-default service account).
 
-Authenticate for local Python calls (if running `run_demo.py` from a
-workstation rather than Cloud Shell):
+Authenticate for local Python calls (if running from a workstation rather
+than Cloud Shell):
 
 ```bash
 gcloud auth application-default login
@@ -40,6 +51,10 @@ gcloud auth application-default login
 ```bash
 pip install -r demo/requirements.txt
 ```
+
+This installs everything needed for Option 0 and Option 1 (including
+`apache-beam[gcp]` and `google-cloud-pubsub`). Option 2 (Airflow) has its
+own install step if running locally - see §6c.
 
 ## 2. GCS buckets and sample data
 
@@ -115,7 +130,7 @@ entry group from the console (Dataplex Universal Catalog → Governance →
 Metadata enrichment → AI-generated metadata) to see that feature applied
 to the demo entries too - it's a console toggle, no code change.
 
-## 6. Run the demo
+## 6a. Run the demo - Option 0 (one process, synchronous)
 
 ```bash
 python demo/run_demo.py \
@@ -139,6 +154,98 @@ Bad records Parquet: gs://<quarantine_bucket>/quarantine/orders/<job_id>/*.parqu
 (~150 of the 1000 sample rows each fail exactly one rule - see the
 breakdown table in demo/README.md - leaving ~850 clean rows in Silver,
 grouped into 4 Gold rows, one per `status` value.)
+
+## 6b. Run the demo - Option 1 (Dataflow + Pub/Sub)
+
+Create the topic and subscription once:
+
+```bash
+gcloud pubsub topics create dq-demo-ingest-complete --project=${PROJECT_ID}
+gcloud pubsub subscriptions create dq-demo-ingest-complete-sub \
+  --topic=dq-demo-ingest-complete --project=${PROJECT_ID}
+```
+
+Start the listener **first**, in one terminal (or background it with `&`)
+- it needs to already be subscribed before the Dataflow job publishes,
+since Pub/Sub doesn't replay messages to a subscription that didn't exist
+yet:
+
+```bash
+python demo/pubsub_listener.py --project=${PROJECT_ID} \
+  --subscription=dq-demo-ingest-complete-sub --once \
+  --quarantine_bucket=${QUARANTINE_BUCKET}
+```
+
+Then, in a second terminal, run the Beam ingestion job. `DirectRunner`
+runs locally against your real GCP resources (fast, no Dataflow service
+cost - good for a first test); `DataflowRunner` actually launches a
+managed Dataflow job (takes a few minutes to spin up a worker):
+
+```bash
+# fast local test:
+python demo/dataflow/beam_ingest.py --runner=DirectRunner --project=${PROJECT_ID} \
+  --input=gs://${RAW_BUCKET}/raw/orders/sample_orders.parquet \
+  --output_table=${PROJECT_ID}:dq_demo.orders_bronze \
+  --topic=projects/${PROJECT_ID}/topics/dq-demo-ingest-complete
+
+# actual Dataflow service:
+python demo/dataflow/beam_ingest.py --runner=DataflowRunner --project=${PROJECT_ID} \
+  --region=${REGION} --temp_location=gs://${RAW_BUCKET}/tmp \
+  --input=gs://${RAW_BUCKET}/raw/orders/sample_orders.parquet \
+  --output_table=${PROJECT_ID}:dq_demo.orders_bronze \
+  --topic=projects/${PROJECT_ID}/topics/dq-demo-ingest-complete
+```
+
+Once the Beam job finishes and publishes, the listener in terminal 1 picks
+up the message, runs the same validate/quarantine/Silver/Gold/catalog
+pipeline as Option 0, prints the result, and exits (`--once`). Drop
+`--once` to keep it running and process multiple ingestion jobs over time.
+
+## 6c. Run the demo - Option 2 (Airflow)
+
+**Locally in Cloud Shell** (no Composer cost, good for a quick test):
+
+```bash
+pip install "apache-airflow==2.9.3" "apache-airflow-providers-google"
+export AIRFLOW_HOME=~/airflow_demo
+airflow standalone &   # prints the admin password on first run; UI on :8080 (use `cloud shell web preview`)
+
+mkdir -p $AIRFLOW_HOME/dags
+cp demo/airflow_dags/demo_orders_dag.py $AIRFLOW_HOME/dags/
+cp -r demo/pipeline $AIRFLOW_HOME/dags/
+
+airflow variables set gcp_project ${PROJECT_ID}
+airflow variables set dq_demo_raw_bucket ${RAW_BUCKET}
+airflow variables set dq_demo_quarantine_bucket ${QUARANTINE_BUCKET}
+
+airflow dags trigger demo_orders_bronze_silver_gold
+airflow dags list-runs -d demo_orders_bronze_silver_gold   # check status
+```
+
+**On a real Cloud Composer environment:**
+
+```bash
+gcloud composer environments create dq-demo-composer \
+  --project=${PROJECT_ID} --location=${REGION} --image-version=composer-2-airflow-2
+
+gcloud composer environments run dq-demo-composer --location=${REGION} \
+  variables set -- gcp_project ${PROJECT_ID}
+gcloud composer environments run dq-demo-composer --location=${REGION} \
+  variables set -- dq_demo_raw_bucket ${RAW_BUCKET}
+gcloud composer environments run dq-demo-composer --location=${REGION} \
+  variables set -- dq_demo_quarantine_bucket ${QUARANTINE_BUCKET}
+
+DAGS_BUCKET=$(gcloud composer environments describe dq-demo-composer \
+  --location=${REGION} --format="value(config.dagGcsPrefix)")
+gsutil -m cp -r demo/airflow_dags/demo_orders_dag.py demo/pipeline ${DAGS_BUCKET}/
+
+gcloud composer environments run dq-demo-composer --location=${REGION} \
+  dags trigger -- demo_orders_bronze_silver_gold
+```
+
+Composer takes 20-25 minutes to provision if you don't already have an
+environment - the local `airflow standalone` route is much faster for
+just testing the DAG logic.
 
 ## 7. Verify
 
@@ -199,4 +306,13 @@ gsutil -m rm -r gs://${QUARANTINE_BUCKET}
 bq rm -r -f -d ${PROJECT_ID}:dq_demo
 gcloud dataplex datascans delete orders-dq-scan --project=${PROJECT_ID} --location=${REGION} --quiet
 gcloud dataplex entry-groups delete dq-demo-group --project=${PROJECT_ID} --location=${REGION} --quiet
+
+# if you did Option 1:
+gcloud pubsub subscriptions delete dq-demo-ingest-complete-sub --project=${PROJECT_ID} --quiet
+gcloud pubsub topics delete dq-demo-ingest-complete --project=${PROJECT_ID} --quiet
+
+# if you deployed Option 2 to a real Composer environment:
+gcloud composer environments delete dq-demo-composer --project=${PROJECT_ID} --location=${REGION} --quiet
+# if you ran Option 2 locally instead, just remove the local Airflow home:
+rm -rf ~/airflow_demo
 ```

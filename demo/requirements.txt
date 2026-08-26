@@ -1,6 +1,6 @@
-# Minimal dependencies to run demo/run_demo.py locally against a real GCP project.
-# (No PyYAML or google-cloud-storage: this demo's config is hardcoded
-# constants in run_demo.py, and loader.py loads straight from a GCS URI via
+# Minimal dependencies to run demo/run_demo.py (Option 0) locally against a
+# real GCP project. (No PyYAML or google-cloud-storage: this demo's config
+# is hardcoded constants, and loader.py loads straight from a GCS URI via
 # the BigQuery client - no Storage client needed. No google-cloud-datacatalog
 # either - catalog registration uses dataplex_v1.CatalogServiceClient, the
 # non-deprecated Dataplex Universal Catalog / Knowledge Catalog write API.)
@@ -9,6 +9,19 @@ google-cloud-bigquery==3.11.0
 # AspectType) - that landed in the 2.x line, so this must be >= 2.x.
 google-cloud-dataplex>=2.20.0
 
+# Needed for Option 1 (Dataflow + Pub/Sub): dataflow/beam_ingest.py and
+# pubsub_listener.py. Not needed for Option 0 (run_demo.py) or Option 2
+# (Airflow, which reuses pipeline/loader.py's plain BigQuery load instead).
+apache-beam[gcp]==2.52.0
+google-cloud-pubsub==2.21.1
+
 # Only needed to regenerate demo/data/sample_orders.parquet
 # (python demo/data/generate_sample_orders.py) - not needed to run the demo itself.
 pyarrow==17.0.0
+
+# Needed for Option 2 (Airflow) ONLY if running airflow standalone locally
+# in Cloud Shell rather than deploying to Cloud Composer (which already has
+# Airflow installed). Not installed by this requirements.txt by default -
+# see the header of airflow_dags/demo_orders_dag.py for the separate
+# install command (apache-airflow[gcp] pulls in a lot and can conflict with
+# the pins above, so keep it in its own virtualenv).
